@@ -1,0 +1,102 @@
+diff -r 6a043adb1e8d src/mem/cache/BaseCache.py
+--- a/src/mem/cache/BaseCache.py	Thu Jul 11 13:56:05 2013 -0500
++++ b/src/mem/cache/BaseCache.py	Thu Jan 09 10:25:33 2014 +0100
+@@ -50,6 +50,7 @@
+     assoc = Param.Int("associativity")
+     block_size = Param.Int("block size in bytes")
+     hit_latency = Param.Cycles("The hit latency for this cache")
++    write_latency = Param.Cycles("The write latency for this cache")
+     response_latency = Param.Cycles(
+             "Additional cache latency for the return path to core on a miss");
+     max_miss_count = Param.Counter(0,
+diff -r 6a043adb1e8d src/mem/cache/base.hh
+--- a/src/mem/cache/base.hh	Thu Jul 11 13:56:05 2013 -0500
++++ b/src/mem/cache/base.hh	Thu Jan 09 10:25:33 2014 +0100
+@@ -251,6 +251,11 @@
+     const Cycles hitLatency;
+ 
+     /**
++     * The latency of a write in this device.
++     */
++    const Cycles writeLatency;
++
++    /**
+      * The latency of sending reponse to its upper level cache/core on a
+      * linefill. In most contemporary processors, the return path on a cache
+      * miss is much quicker that the hit latency. The responseLatency parameter
+diff -r 6a043adb1e8d src/mem/cache/base.cc
+--- a/src/mem/cache/base.cc	Thu Jul 11 13:56:05 2013 -0500
++++ b/src/mem/cache/base.cc	Thu Jan 09 10:25:33 2014 +0100
+@@ -73,6 +73,7 @@
+                   MSHRQueue_WriteBuffer),
+       blkSize(p->block_size),
+       hitLatency(p->hit_latency),
++      writeLatency(p->write_latency),
+       responseLatency(p->response_latency),
+       numTarget(p->tgts_per_mshr),
+       forwardSnoops(p->forward_snoops),
+diff -r 6a043adb1e8d src/mem/cache/cache_impl.hh
+--- a/src/mem/cache/cache_impl.hh	Thu Jul 11 13:56:05 2013 -0500
++++ b/src/mem/cache/cache_impl.hh	Thu Jan 09 10:25:33 2014 +0100
+@@ -284,7 +284,16 @@
+         uncacheableFlush(pkt);
+         blk = NULL;
+         lat = hitLatency;
+-        return false;
++	// Update latency decided by if it is read or write
++	if(pkt->isWrite()) {
++		lat = writeLatency;
++	}
++	return false;
++    }
++
++    // Update latency decided by if it is read or write
++    if(pkt->isWrite()) {
++	lat = writeLatency;
+     }
+ 
+     int id = pkt->req->hasContextId() ? pkt->req->contextId() : -1;
+@@ -928,7 +937,7 @@
+                 // from lower level caches/memory to an upper level cache or
+                 // the core.
+                 completion_time = clockEdge(responseLatency) +
+-                    (transfer_offset ? pkt->busLastWordDelay :
++                    writeLatency * clockPeriod() + (transfer_offset ? pkt->busLastWordDelay :
+                      pkt->busFirstWordDelay);
+ 
+                 assert(!target->pkt->req->isUncacheable());
+@@ -1255,7 +1264,7 @@
+     }
+ 
+     blk->whenReady = clockEdge() + responseLatency * clockPeriod() +
+-        pkt->busLastWordDelay;
++        writeLatency * clockPeriod() + pkt->busLastWordDelay;
+ 
+     return blk;
+ }
+diff -r 6a043adb1e8d src/mem/cache/tags/lru.cc
+--- a/src/mem/cache/tags/lru.cc	Thu Jul 11 13:56:05 2013 -0500
++++ b/src/mem/cache/tags/lru.cc	Thu Jan 09 10:25:33 2014 +0100
+@@ -125,20 +125,20 @@
+     delete [] sets;
+ }
+ 
++// Modification to take in account the right access latency (read or write)
+ LRU::BlkType*
+ LRU::accessBlock(Addr addr, Cycles &lat, int master_id)
+ {
+     Addr tag = extractTag(addr);
+     unsigned set = extractSet(addr);
+     BlkType *blk = sets[set].findBlk(tag);
+-    lat = hitLatency;
+     if (blk != NULL) {
+         // move this block to head of the MRU list
+         sets[set].moveToHead(blk);
+         DPRINTF(CacheRepl, "set %x: moving blk %x to MRU\n",
+                 set, regenerateBlkAddr(tag, set));
+         if (blk->whenReady > curTick()
+-            && cache->ticksToCycles(blk->whenReady - curTick()) > hitLatency) {
++            && cache->ticksToCycles(blk->whenReady - curTick()) > lat) {
+             lat = cache->ticksToCycles(blk->whenReady - curTick());
+         }
+         blk->refCount += 1;
